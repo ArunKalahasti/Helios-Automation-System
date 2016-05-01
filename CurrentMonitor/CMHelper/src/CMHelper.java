@@ -1,7 +1,12 @@
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.sql.Connection;
 //import java.io.OutputStream;
-
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.Timer;
@@ -40,8 +45,10 @@ public class CMHelper implements SerialPortEventListener {
 	/** Default bits per second for COM port. */
 	private static final int DATA_RATE = 9600;
 	
-	private static int count;
-	private static double sum;
+	private static int count = 0;
+	private static double sum = 0;
+	private static int hourCount = 0;
+	private static double hourSum = 0;
 	Timer timer;
 	boolean flag;
 	
@@ -53,6 +60,12 @@ public class CMHelper implements SerialPortEventListener {
 	private static MemoryPersistence persistence;
 	private static MqttClient client;
 	private static MqttConnectOptions connOpts;
+	
+	// JDBC driver name and database URL
+	static final String JDBC_DRIVER = "com.mysql.jdbc.Driver";  
+	static final String DB_URL = "jdbc:mysql://localhost/helios_db";
+	private static Connection conn;
+	private static Statement stmt;
 
 	public void initialize() {
                 
@@ -82,6 +95,16 @@ public class CMHelper implements SerialPortEventListener {
 		System.out.println("starting publisher");
 		flag = initMQTT();
 		System.out.println("publisher setup");
+		
+		try {
+			Class.forName(JDBC_DRIVER);
+			System.out.println("Connecting to database...");
+			conn = DriverManager.getConnection(DB_URL, "root", "1234");
+		} catch (Exception e) {
+			System.out.println("Connecting failed");
+			System.err.println(e.toString());
+		}
+		
 		if(flag != true){return;}
 		System.out.println("starting serial reader");
 		try {
@@ -159,6 +182,12 @@ public class CMHelper implements SerialPortEventListener {
 		} catch (MqttException e) {
 			e.printStackTrace();
 		}
+		try {
+			stmt.close();
+			conn.close();
+		} catch (SQLException e) {
+			e.printStackTrace();
+		}
 		System.exit(0);
 	}
 
@@ -171,7 +200,9 @@ public class CMHelper implements SerialPortEventListener {
 				String inputLine=input.readLine();
 				//System.out.println(inputLine);
 				sum += Double.valueOf(inputLine);
+				hourSum += Double.valueOf(inputLine);
 				count ++;
+				hourCount ++;
 			} catch (Exception e) {
 				//System.out.println("derp");
 			}
@@ -187,27 +218,48 @@ public class CMHelper implements SerialPortEventListener {
 	
 	public void run() {
 		try {
+			Date date = new Date();
+			int inst = (int) (5000-(date.getTime()%5000));
+			int hour = (int) (3600000-(date.getTime()%3600000));
 			timer = new Timer();
-	        timer.scheduleAtFixedRate(new RemindTask(),new Date(),5000);
+	        timer.scheduleAtFixedRate(new RemindTaskInstant(),inst,5000);
+	        timer.scheduleAtFixedRate(new RemindTaskHour(),hour,3600000);
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 	}
 	
-	class RemindTask extends TimerTask {
+	class RemindTaskInstant extends TimerTask {
         public void run() {
-        	String text;
+        	String text, sql;
         	if (count == 0){
         		System.out.println("count is 0");
         	}
         	else {
-        		System.out.print("average: ");
+        		System.out.print("inst average: ");
         		System.out.printf("%.2f",(sum/count));
         		System.out.println(" count: "+count);
         		try {
-        			text = String.format("%.2f",(sum/count));
+        			text = String.format("%.3f",(sum/count));
 					publish(text);
-				} catch (InterruptedException e) {
+					sql = "INSERT INTO currentRecordInstant (sensor_id,time,value) "
+							+ "VALUES (?, ?, ?)";
+					PreparedStatement preparedStmt = conn.prepareStatement(sql);
+					Timestamp time = new Timestamp(System.currentTimeMillis());
+				    preparedStmt.setInt(1, 1);
+				    preparedStmt.setTimestamp(2, time);
+				    preparedStmt.setFloat(3, Float.valueOf(text));
+				    preparedStmt.execute();	
+				    
+				    sql = "UPDATE lastCurrentRecord SET time=?, value=? WHERE sensor_id=?";
+					preparedStmt = conn.prepareStatement(sql);
+				    preparedStmt.setInt(3, 1);
+				    preparedStmt.setTimestamp(1, time);
+				    preparedStmt.setFloat(2, Float.valueOf(text));
+				    System.out.println(preparedStmt.toString());
+				    preparedStmt.execute();	
+				    
+				} catch (InterruptedException | SQLException e) {
 					e.printStackTrace();
 				}
         	}
@@ -215,4 +267,35 @@ public class CMHelper implements SerialPortEventListener {
             count = 0;
         }
     }
+	
+	class RemindTaskHour extends TimerTask {
+        public void run() {
+        	String text, sql;
+        	if (hourCount == 0){
+        		System.out.println("count is 0");
+        	}
+        	else {
+        		System.out.print("hour average: ");
+        		System.out.printf("%.2f",(hourSum/hourCount));
+        		System.out.println(" count: "+hourCount);
+        		try {
+        			text = String.format("%.3f",(hourSum/hourCount));
+					publish(text);
+					sql = "INSERT INTO currentRecordHourly (sensor_id,time,value) "
+							+ "VALUES (?, ?, ?)";
+					PreparedStatement preparedStmt = conn.prepareStatement(sql);
+					Timestamp time = new Timestamp(System.currentTimeMillis());
+				    preparedStmt.setInt(1, 1);
+				    preparedStmt.setTimestamp(2, time);
+				    preparedStmt.setFloat(3, Float.valueOf(text));
+				    preparedStmt.execute();				    
+				} catch (InterruptedException | SQLException e) {
+					e.printStackTrace();
+				}
+        	}
+            hourSum = 0;
+            hourCount = 0;
+        }
+    }
+	
 }
